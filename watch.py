@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""TGT Deal Watcher - headless browser build"""
+"""TGT Deal Watcher - patchright headful build"""
 
 import json
 import os
@@ -8,7 +8,7 @@ import time
 from urllib.parse import urlencode
 
 from bs4 import BeautifulSoup
-from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
+from patchright.sync_api import sync_playwright, TimeoutError as PWTimeout
 
 TELEGRAM_TOKEN   = "9009311645:AAEQsuOHAacPg85bd8TSCe5ZLpezFQth2EM"
 TELEGRAM_CHAT_ID = "5217009434"
@@ -26,9 +26,6 @@ CATEGORIES = {
 BASE      = "https://texasguntrader.com"
 SEEN_FILE = "seen.json"
 PAGES     = 1
-
-UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-      "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15")
 
 ID_RE    = re.compile(r"/listings/(\d+)")
 PRINT_RE = re.compile(r"/print/(\d+)")
@@ -53,19 +50,15 @@ def candidate_urls(cat, slug, page):
 def fetch_all(urls):
     out = {}
     with sync_playwright() as p:
-        browser = p.chromium.launch(args=[
-            "--no-sandbox",
-            "--disable-blink-features=AutomationControlled",
-            "--disable-dev-shm-usage",
-        ])
+        browser = p.chromium.launch(
+            headless=False,
+            channel="chromium",
+            args=["--no-sandbox", "--disable-dev-shm-usage"],
+        )
         ctx = browser.new_context(
-            user_agent=UA,
             locale="en-US",
             timezone_id="America/Chicago",
             viewport={"width": 1366, "height": 900},
-        )
-        ctx.add_init_script(
-            "Object.defineProperty(navigator,'webdriver',{get:()=>undefined});"
         )
         page = ctx.new_page()
         for url in urls:
@@ -73,11 +66,21 @@ def fetch_all(urls):
                 resp = page.goto(url, wait_until="domcontentloaded", timeout=60000)
                 code = resp.status if resp else 0
                 html, ok = "", False
-                for _ in range(30):
+                for i in range(60):
                     html = page.content()
                     if "/listings/" in html or "/print/" in html:
                         ok = True
                         break
+                    if i == 8:
+                        for fr in page.frames:
+                            try:
+                                box = fr.locator("input[type=checkbox]")
+                                if box.count():
+                                    box.first.click(timeout=2000)
+                                    print("[pw] clicked turnstile")
+                                    break
+                            except Exception:
+                                pass
                     page.wait_for_timeout(1000)
                 print(f"[pw] {code} ok={ok} title={page.title()[:70]!r}")
                 if ok:
@@ -169,8 +172,7 @@ def main():
         for page in range(1, PAGES + 1):
             jobs.append((cat, catname, candidate_urls(cat, slug, page)))
 
-    flat = [u for _, _, urls in jobs for u in urls]
-    fetched = fetch_all(flat)
+    fetched = fetch_all([u for _, _, urls in jobs for u in urls])
 
     alerts = []
     scanned = 0
