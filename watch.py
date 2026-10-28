@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
-"""
-TGT Deal Watcher
-Watches TexasGunTrader for cheap guns near Georgetown TX (78626) and texts you on Telegram.
-Criteria: max $500, within 20 miles, handguns + semi-auto rifles.
-"""
+"""TGT Deal Watcher - debug build"""
 
 import json
 import os
@@ -15,11 +11,9 @@ from urllib.parse import urlencode
 import requests
 from bs4 import BeautifulSoup
 
-# ---------------- YOUR CREDENTIALS ----------------
 TELEGRAM_TOKEN   = "9046847877:AAHKQyLh0SMqj0L74ozN0HU39z8C6w4L0Yc"
 TELEGRAM_CHAT_ID = "5217009434"
 
-# ---------------- CRITERIA ----------------
 ZIP            = "78626"
 DISTANCE_MILES = 20
 MAX_PRICE      = 500
@@ -45,15 +39,15 @@ PRINT_RE = re.compile(r"/print/(\d+)")
 PRICE_RE = re.compile(r"\$\s?([\d][\d,]*)")
 
 
-# ---------------- HELPERS ----------------
-def get(url, tries=3):
+def get(url, tries=2):
     for _ in range(tries):
         try:
             r = requests.get(url, headers=HEADERS, timeout=25)
+            print(f"[fetch] {r.status_code} len={len(r.text)} {url}")
             if r.status_code == 200:
                 return r.text
-        except requests.RequestException:
-            pass
+        except requests.RequestException as e:
+            print(f"[fetch-error] {e} {url}")
         time.sleep(2)
     return ""
 
@@ -128,14 +122,17 @@ def est_resale(price):
 def send_telegram(text):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     try:
-        requests.post(url, data={
+        r = requests.post(url, data={
             "chat_id": TELEGRAM_CHAT_ID,
             "text": text,
             "parse_mode": "HTML",
             "disable_web_page_preview": "false",
         }, timeout=20)
+        print(f"[telegram] status={r.status_code} body={r.text[:400]}")
+        return r.ok
     except requests.RequestException as e:
-        print("telegram error:", e)
+        print(f"[telegram-error] {e}")
+        return False
 
 
 def load_seen():
@@ -153,11 +150,12 @@ def save_seen(seen):
         json.dump(seen, f, indent=1, sort_keys=True)
 
 
-# ---------------- MAIN ----------------
 def main():
     first_run = not os.path.exists(SEEN_FILE)
+    print(f"[start] first_run={first_run}")
     seen = load_seen()
     alerts = []
+    scanned = 0
 
     for cat, (slug, catname) in CATEGORIES.items():
         for page in range(1, PAGES + 1):
@@ -167,14 +165,18 @@ def main():
                 if html and ("/listings/" in html or "/print/" in html):
                     break
             if not html:
+                print(f"[skip] no html cat={cat} page={page}")
                 continue
 
-            for lid, item in parse_search(html, catname).items():
+            items = parse_search(html, catname)
+            scanned += len(items)
+            print(f"[parse] cat={cat} page={page} items={len(items)}")
+
+            for lid, item in items.items():
                 price = item["price"]
                 prev = seen.get(lid)
                 link = f"{BASE}/print/{lid}/item.html"
 
-                # already alerted, no price change -> skip
                 if prev is not None:
                     old = prev.get("price")
                     if price is not None and old is not None and price < old - 20:
@@ -188,11 +190,9 @@ def main():
                         seen[lid] = {"price": price, "t": datetime.utcnow().isoformat()}
                     continue
 
-                # new listing
                 seen[lid] = {"price": price, "t": datetime.utcnow().isoformat()}
 
                 if price is None:
-                    # "contact for price" — worth a lowball
                     alerts.append(
                         f"❓ <b>NO PRICE — {catname}</b>\n"
                         f"{item['title']}\n"
@@ -216,16 +216,21 @@ def main():
                     f"Ask: <b>${price}</b>{prof_line}\n{link}"
                 )
 
+    print(f"[scan] total listings seen = {scanned}")
+
     if first_run:
         send_telegram("✅ TGT watcher is LIVE. Watching TexasGunTrader every 5 min "
                       "for guns under $500 within 20 mi of 78626.")
+
+    if scanned == 0:
+        send_telegram("⚠️ TGT watcher ran but found 0 listings — scraper needs a fix.")
 
     for msg in alerts[:25]:
         send_telegram(msg)
         time.sleep(1)
 
     save_seen(seen)
-    print(f"done — {len(alerts)} alert(s)")
+    print(f"[done] {len(alerts)} alert(s)")
 
 
 if __name__ == "__main__":
