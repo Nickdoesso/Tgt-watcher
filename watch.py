@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""TGT Deal Watcher - proxy build"""
+"""TGT Deal Watcher - multi-proxy debug"""
 
 import json
 import os
 import re
 import time
 from datetime import datetime
-from urllib.parse import urlencode
+from urllib.parse import urlencode, quote
 
 import requests
 from bs4 import BeautifulSoup
@@ -26,12 +26,21 @@ CATEGORIES = {
 
 BASE      = "https://texasguntrader.com"
 SEEN_FILE = "seen.json"
-PAGES     = 2
+PAGES     = 1
 
 UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
       "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15")
 
-HEADERS = {"User-Agent": UA, "Accept-Language": "en-US,en;q=0.9"}
+HEADERS = {
+    "User-Agent": UA,
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Upgrade-Insecure-Requests": "1",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+}
 
 ID_RE    = re.compile(r"/listings/(\d+)")
 PRINT_RE = re.compile(r"/print/(\d+)")
@@ -39,29 +48,33 @@ PRICE_RE = re.compile(r"\$\s?([\d][\d,]*)")
 MD_RE    = re.compile(r"\[([^\]\n]{3,200})\]\((https?://[^)\s]+)\)")
 
 
-def get(url, tries=2):
-    for _ in range(tries):
-        try:
-            r = requests.get("https://r.jina.ai/" + url,
-                             headers={"User-Agent": UA, "Accept": "text/plain"},
-                             timeout=60)
-            print(f"[proxy] {r.status_code} len={len(r.text)}")
-            if r.status_code == 200 and len(r.text) > 500:
-                return r.text
-        except requests.RequestException as e:
-            print(f"[proxy-error] {e}")
-        time.sleep(3)
+def try_url(label, url, headers=None, timeout=45):
+    try:
+        r = requests.get(url, headers=headers or {"User-Agent": UA}, timeout=timeout)
+        body = r.text or ""
+        print(f"[{label}] {r.status_code} len={len(body)}")
+        if r.status_code != 200 or len(body) < 3000:
+            print(f"[{label}-body] {body[:400]!r}")
+            return ""
+        return body
+    except requests.RequestException as e:
+        print(f"[{label}-error] {e}")
+        return ""
 
-    for _ in range(tries):
-        try:
-            r = requests.get(url, headers=HEADERS, timeout=25)
-            print(f"[direct] {r.status_code} len={len(r.text)}")
-            if r.status_code == 200:
-                return r.text
-            print(f"[direct-body] {r.text[:200]!r}")
-        except requests.RequestException as e:
-            print(f"[direct-error] {e}")
-        time.sleep(2)
+
+def get(url):
+    enc = quote(url, safe="")
+    attempts = [
+        ("codetabs", "https://api.codetabs.com/v1/proxy?quest=" + enc, None),
+        ("allorigins", "https://api.allorigins.win/raw?url=" + enc, None),
+        ("jina", "https://r.jina.ai/" + url, None),
+        ("direct", url, HEADERS),
+    ]
+    for label, u, h in attempts:
+        body = try_url(label, u, h)
+        if body:
+            return body
+        time.sleep(1)
     return ""
 
 
@@ -95,41 +108,32 @@ def add_hit(found, lid, title, blob, catname):
     pm = PRICE_RE.search(blob)
     price = int(pm.group(1).replace(",", "")) if pm else None
     if lid not in found:
-        found[lid] = {"id": lid, "title": title, "blob": blob,
-                      "price": price, "cat": catname}
+        found[lid] = {"id": lid, "title": title, "price": price, "cat": catname}
     else:
         e = found[lid]
-        if len(blob) > len(e["blob"]):
-            e["blob"] = blob
-            if price:
-                e["price"] = price
+        if price and not e["price"]:
+            e["price"] = price
         if len(title) > len(e["title"]):
             e["title"] = title
 
 
 def parse_search(raw, catname):
     found = {}
-
     if "<a " in raw:
         soup = BeautifulSoup(raw, "html.parser")
         for a in soup.find_all("a", href=True):
-            href = a["href"]
-            m = ID_RE.search(href) or PRINT_RE.search(href)
+            m = ID_RE.search(a["href"]) or PRINT_RE.search(a["href"])
             if not m:
                 continue
-            add_hit(found, m.group(1),
-                    a.get_text(" ", strip=True),
+            add_hit(found, m.group(1), a.get_text(" ", strip=True),
                     container_text(a), catname)
-
     if not found:
         for m in MD_RE.finditer(raw):
-            title, url = m.group(1), m.group(2)
-            im = ID_RE.search(url) or PRINT_RE.search(url)
+            im = ID_RE.search(m.group(2)) or PRINT_RE.search(m.group(2))
             if not im:
                 continue
             blob = raw[max(0, m.start() - 250): m.end() + 250]
-            add_hit(found, im.group(1), title, blob, catname)
-
+            add_hit(found, im.group(1), m.group(1), blob, catname)
     return found
 
 
@@ -156,31 +160,22 @@ def send_telegram(text):
             "parse_mode": "HTML",
             "disable_web_page_preview": "false",
         }, timeout=20)
-        print(f"[telegram] {r.status_code} {r.text[:300]}")
+        print(f"[telegram] {r.status_code}")
         return r.ok
     except requests.RequestException as e:
         print(f"[telegram-error] {e}")
         return False
 
 
-def load_seen():
-    if os.path.exists(SEEN_FILE):
-        try:
-            with open(SEEN_FILE) as f:
-                return json.load(f)
-        except Exception:
-            return {}
-    return {}
-
-
-def save_seen(seen):
-    with open(SEEN_FILE, "w") as f:
-        json.dump(seen, f, indent=1, sort_keys=True)
-
-
 def main():
     print("[start]")
-    seen = load_seen()
+    seen = {}
+    if os.path.exists(SEEN_FILE):
+        try:
+            seen = json.load(open(SEEN_FILE))
+        except Exception:
+            seen = {}
+
     alerts = []
     scanned = 0
 
@@ -192,67 +187,46 @@ def main():
                 if raw and ("/listings/" in raw or "/print/" in raw):
                     break
             if not raw:
-                print(f"[skip] empty cat={cat} page={page}")
+                print(f"[skip] empty cat={cat}")
                 continue
 
             items = parse_search(raw, catname)
             scanned += len(items)
-            print(f"[parse] cat={cat} page={page} items={len(items)}")
+            print(f"[parse] cat={cat} items={len(items)}")
 
             for lid, item in items.items():
                 price = item["price"]
-                prev = seen.get(lid)
+                if lid in seen:
+                    continue
+                seen[lid] = {"price": price}
                 link = f"{BASE}/print/{lid}/item.html"
 
-                if prev is not None:
-                    old = prev.get("price")
-                    if price is not None and old is not None and price < old - 20:
-                        resale = est_resale(price)
-                        prof = f"\nEst. resale: ${resale}  →  ~${resale - price} profit" if resale else ""
-                        alerts.append(
-                            f"📉 <b>PRICE DROP — {catname}</b>\n"
-                            f"{item['title']}\n"
-                            f"Was ${old} → now <b>${price}</b>{prof}\n{link}"
-                        )
-                        seen[lid] = {"price": price, "t": datetime.utcnow().isoformat()}
-                    continue
-
-                seen[lid] = {"price": price, "t": datetime.utcnow().isoformat()}
-
                 if price is None:
-                    alerts.append(
-                        f"❓ <b>NO PRICE — {catname}</b>\n"
-                        f"{item['title']}\n"
-                        f"No price listed — worth a lowball bid\n{link}"
-                    )
+                    alerts.append(f"❓ NO PRICE — {catname}\n{item['title']}\n{link}")
                     continue
-
                 if price > MAX_PRICE:
                     continue
-
                 resale = est_resale(price)
-                prof = resale - price if resale else 0
+                prof = (resale - price) if resale else 0
                 if resale and prof < MIN_PROFIT:
                     continue
-
                 tag = "🔥" if prof >= 250 else "✅"
-                prof_line = f"\nEst. resale: ${resale}  →  ~${prof} profit" if resale else ""
                 alerts.append(
-                    f"{tag} <b>NEW DEAL — {catname}</b>\n"
-                    f"{item['title']}\n"
-                    f"Ask: <b>${price}</b>{prof_line}\n{link}"
+                    f"{tag} DEAL — {catname}\n{item['title']}\n"
+                    f"Ask ${price} → est ${resale} (~${prof})\n{link}"
                 )
 
     print(f"[scan] listings = {scanned}")
 
     if scanned == 0:
-        send_telegram("⚠️ Ran, but found 0 listings — still blocked.")
+        send_telegram("⚠️ Ran, found 0 listings.")
 
     for msg in alerts[:25]:
         send_telegram(msg)
         time.sleep(1)
 
-    save_seen(seen)
+    with open(SEEN_FILE, "w") as f:
+        json.dump(seen, f, indent=1, sort_keys=True)
     print(f"[done] {len(alerts)} alert(s)")
 
 
