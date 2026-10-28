@@ -25,15 +25,17 @@ jobs:
       - uses: actions/cache@v4
         with:
           path: ~/.cache/ms-playwright
-          key: pw-${{ runner.os }}-v1
+          key: pw2-${{ runner.os }}-v1
 
       - name: Install deps
         run: |
-          pip install playwright beautifulsoup4 requests
-          python -m playwright install --with-deps chromium
+          sudo apt-get update
+          sudo apt-get install -y xvfb
+          pip install patchright beautifulsoup4 requests
+          python -m patchright install --with-deps chromium
 
       - name: Run watcher
-        run: python watch.py
+        run: xvfb-run -a python watch.py
 
       - name: Save state
         run: |
