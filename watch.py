@@ -11,7 +11,7 @@ from urllib.parse import urlencode
 import requests
 from bs4 import BeautifulSoup
 
-TELEGRAM_TOKEN   = "9009311645:AAEQsu0HAacPg85bd8TSCe5ZLpezFQth2EM"
+TELEGRAM_TOKEN   = "9009311645:AAEQsuOHAacPg85bd8TSCe5ZLpezFQth2EM"
 TELEGRAM_CHAT_ID = "5217009434"
 
 ZIP            = "78626"
